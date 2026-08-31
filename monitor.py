@@ -18,7 +18,9 @@ except ImportError:
 BOT_TOKEN = "8849384703:AAFFf9VbgmpadHUvYJ3ZZDagoqZyDgpz3-M"
 CHAT_ID = "8368744809"
 
-# Список целевых категорий для мониторинга
+# Максимум сообщений за 1 проверку (защита от залпового спама)
+MAX_ALERTS_PER_CHECK = 3
+
 URLS_TO_TRACK = [
     {
         "name": "🏢 Продажа квартир (от $50k)",
@@ -40,7 +42,6 @@ URLS_TO_TRACK = [
     }
 ]
 
-# Проверка каждые 2 минуты
 CHECK_INTERVAL = 120
 SEEN_FILE = "seen_items.json"
 # ===================================================
@@ -63,7 +64,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Real Estate Bot is Active 24/7!")
+        self.wfile.write(b"Bot is Running 24/7!")
     def log_message(self, format, *args):
         pass
 
@@ -162,7 +163,11 @@ def parse_category_page(category_info, seen_items):
             continue
         
         item_id = href.replace("/item/", "").split("?")[0].strip()
-        if not item_id.isdigit() or item_id in seen_items:
+        if not item_id.isdigit():
+            continue
+
+        # Если уже в памяти — пропускаем
+        if item_id in seen_items:
             continue
 
         price_elem = a.find("div", class_="p") or a.find("div", class_="price")
@@ -203,46 +208,56 @@ def main():
     
     seen_items = load_seen_items()
     
-    # 1. Тихое запоминание текущих объявлений при запуске
-    logging.info("Инициализация текущих объявлений...")
+    # 1. Запоминаем текущую базу перед отправкой
+    logging.info("Инициализация базы без спама...")
     for cat in URLS_TO_TRACK:
         items = parse_category_page(cat, seen_items)
         for it in items:
             seen_items.add(it["id"])
+        time.sleep(2)
     save_seen_items(seen_items)
     
-    # 2. Сервисное сообщение
     send_telegram_message(
-        "🎯 <b>Радар недвижимости успешно обновлен!</b>\n\n"
-        "📁 <b>Отслеживаемые категории (только собственники):</b>\n"
-        "1. 🏢 <b>Квартиры:</b> продажа от $50,000\n"
-        "2. 🏡 <b>Дома:</b> продажа от $50,000\n"
-        "3. 🌳 <b>Участки:</b> продажа от $35,000\n\n"
-        f"✅ <i>База инициализирована ({len(seen_items)} объектов в памяти). Старый спам отключен, ждем только свежие публикации!</i>"
+        "🛡 <b>Антиспам-фильтр активирован!</b>\n\n"
+        "✅ <b>База полностью синхронизирована.</b>\n"
+        "🔕 Старый спам заблокирован.\n"
+        "⚡ Теперь приходят только реальные единичные публикации от собственников."
     )
     
-    # 3. Рабочий бесконечный цикл
+    # Пауза перед первым боевым кругом
+    time.sleep(CHECK_INTERVAL)
+    
+    # 2. Боевой цикл
     while True:
         try:
             for cat in URLS_TO_TRACK:
                 new_items = parse_category_page(cat, seen_items)
                 
-                for item in new_items:
-                    seen_items.add(item["id"])
-                    
-                    message = (
-                        f"⚡ <b>НОВОЕ ОБЪЯВЛЕНИЕ (Собственник)</b>\n"
-                        f"🏷 <b>{item['badge']}</b>\n\n"
-                        f"📌 <b>{item['title']}</b>\n"
-                        f"💰 <b>Цена:</b> {item['price']}\n"
-                        f"📍 <b>Локация:</b> {item['location']}\n\n"
-                        f"🔗 <a href='{item['url']}'>Открыть на List.am</a>"
-                    )
-                    
-                    send_telegram_message(message, item.get("photo"))
-                    time.sleep(1)
-            
-            save_seen_items(seen_items)
+                # Антиспам: если внезапно пришло много — тихо запоминаем, не спамим в чат
+                if len(new_items) > MAX_ALERTS_PER_CHECK:
+                    logging.info(f"Залп из {len(new_items)} объявлений проигнорирован (добавлен в базу без отправки).")
+                    for item in new_items:
+                        seen_items.add(item["id"])
+                else:
+                    # Реальные свежие единичные публикации — отправляем
+                    for item in new_items:
+                        seen_items.add(item["id"])
+                        
+                        message = (
+                            f"⚡ <b>НОВОЕ ОБЪЯВЛЕНИЕ (Собственник)</b>\n"
+                            f"🏷 <b>{item['badge']}</b>\n\n"
+                            f"📌 <b>{item['title']}</b>\n"
+                            f"💰 <b>Цена:</b> {item['price']}\n"
+                            f"📍 <b>Локация:</b> {item['location']}\n\n"
+                            f"🔗 <a href='{item['url']}'>Открыть на List.am</a>"
+                        )
+                        
+                        send_telegram_message(message, item.get("photo"))
+                        time.sleep(1)
+                
+                save_seen_items(seen_items)
+                time.sleep(2)
+                
         except Exception as e:
             logging.error(f"Ошибка в цикле: {e}")
 

@@ -1,6 +1,7 @@
 import time
 import json
 import os
+import re
 import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -17,24 +18,30 @@ except ImportError:
 BOT_TOKEN = "8849384703:AAFFf9VbgmpadHUvYJ3ZZDagoqZyDgpz3-M"
 CHAT_ID = "8368744809"
 
-# Список ссылок для мониторинга
+# Список целевых категорий для мониторинга
 URLS_TO_TRACK = [
-    # 1. Квартиры (Арабкир, Аван, Зейтун, Нор-Норк, Абовян - Собственники)
     {
-        "name": "🏢 Квартиры (Ереван / Абовян)",
-        "url": "https://www.list.am/category/60?n=3%2C4%2C7%2C10%2C41&cmtype=0"
+        "name": "🏢 Продажа квартир (от $50k)",
+        "badge": "🏢 КВАРТИРА (Продажа)",
+        "min_price": 50000,
+        "url": "https://www.list.am/category/60?n=3%2C4%2C7%2C10%2C41&cmtype=0&price1=50000&crc=1"
     },
-    # 2. Дома / Земля (Котайк: Абовян, Ариндж, Балаовит, Джрвеж, Нор Ачн и др. - Собственники)
     {
-        "name": "🏡 Дома / Земля (Котайк и пригород)",
-        "url": "https://www.list.am/category/1386?n=41%2C81%2C803%2C89%2C82%2C786%2C107%2C75&cmtype=0"
+        "name": "🏡 Продажа домов (от $50k)",
+        "badge": "🏡 ДОМ (Продажа)",
+        "min_price": 50000,
+        "url": "https://www.list.am/category/1386?n=41%2C81%2C803%2C89%2C82%2C786%2C107%2C75&cmtype=0&price1=50000&crc=1"
+    },
+    {
+        "name": "🌳 Земельные участки (от $35k)",
+        "badge": "🌳 УЧАСТОК (Продажа)",
+        "min_price": 35000,
+        "url": "https://www.list.am/category/1447?n=3%2C4%2C7%2C81%2C803%2C89%2C82%2C786%2C107&cmtype=0&crc=1&price1=35000"
     }
 ]
 
-# Интервал проверки (в секундах) — каждые 2 минуты
+# Проверка каждые 2 минуты
 CHECK_INTERVAL = 120
-
-# Файл для сохранения уже отправленных объявлений
 SEEN_FILE = "seen_items.json"
 # ===================================================
 
@@ -56,14 +63,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"List.am Bot is Running 24/7!")
+        self.wfile.write(b"Real Estate Bot is Active 24/7!")
     def log_message(self, format, *args):
         pass
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logging.info(f"Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
 def load_seen_items():
@@ -71,17 +77,33 @@ def load_seen_items():
         try:
             with open(SEEN_FILE, "r", encoding="utf-8") as f:
                 return set(json.load(f))
-        except Exception as e:
-            logging.error(f"Ошибка загрузки seen_items: {e}")
+        except Exception:
+            pass
     return set()
 
 def save_seen_items(seen_items):
     try:
-        items_list = list(seen_items)[-3000:]
+        items_list = list(seen_items)[-5000:]
         with open(SEEN_FILE, "w", encoding="utf-8") as f:
             json.dump(items_list, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logging.error(f"Ошибка сохранения seen_items: {e}")
+    except Exception:
+        pass
+
+def parse_usd_price(price_str):
+    try:
+        clean = re.sub(r"[^\d]", "", price_str)
+        if not clean:
+            return 0
+        num = int(clean)
+        if "$" in price_str:
+            return num
+        elif "֏" in price_str:
+            return num / 390
+        elif "€" in price_str:
+            return num * 1.08
+        return num
+    except:
+        return 0
 
 def send_telegram_message(text, photo_url=None):
     if photo_url:
@@ -96,8 +118,8 @@ def send_telegram_message(text, photo_url=None):
             r = requests.post(url, data=payload, timeout=10)
             if r.status_code == 200:
                 return True
-        except Exception as e:
-            logging.warning(f"Не удалось отправить с фото: {e}")
+        except Exception:
+            pass
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
@@ -109,29 +131,25 @@ def send_telegram_message(text, photo_url=None):
     try:
         r = requests.post(url, data=payload, timeout=10)
         return r.status_code == 200
-    except Exception as e:
-        logging.error(f"Ошибка отправки в Telegram: {e}")
+    except Exception:
         return False
 
 def fetch_page(url):
     try:
         if USE_CURL_CFFI:
-            resp = requests.get(url, impersonate="chrome120", headers=HEADERS, timeout=20)
+            return requests.get(url, impersonate="chrome120", headers=HEADERS, timeout=20)
         else:
-            resp = requests.get(url, headers=HEADERS, timeout=20)
-        return resp
-    except Exception as e:
-        logging.error(f"Ошибка сетевого запроса к {url}: {e}")
+            return requests.get(url, headers=HEADERS, timeout=20)
+    except Exception:
         return None
 
 def parse_category_page(category_info, seen_items):
     url = category_info["url"]
-    cat_name = category_info["name"]
+    min_p = category_info["min_price"]
+    badge = category_info["badge"]
     
     resp = fetch_page(url)
     if not resp or resp.status_code != 200:
-        code = resp.status_code if resp else "timeout/error"
-        logging.warning(f"Ошибка доступа к {cat_name} (код {code})")
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -144,23 +162,23 @@ def parse_category_page(category_info, seen_items):
             continue
         
         item_id = href.replace("/item/", "").split("?")[0].strip()
-        if not item_id.isdigit():
-            continue
-        
-        if item_id in seen_items:
+        if not item_id.isdigit() or item_id in seen_items:
             continue
 
-        full_url = f"https://www.list.am{href}"
-        
-        title_elem = a.find("div", class_="l") or a.find("div", class_="t") or a.find("div", class_="header")
-        title = title_elem.get_text(strip=True) if title_elem else "Объявление на List.am"
-        
         price_elem = a.find("div", class_="p") or a.find("div", class_="price")
-        price = price_elem.get_text(strip=True) if price_elem else "Цена не указана"
+        price = price_elem.get_text(strip=True) if price_elem else "0"
+        
+        usd_price = parse_usd_price(price)
+        if usd_price > 0 and usd_price < min_p:
+            seen_items.add(item_id)
+            continue
+
+        title_elem = a.find("div", class_="l") or a.find("div", class_="t") or a.find("div", class_="header")
+        title = title_elem.get_text(strip=True) if title_elem else "Объявление"
         
         loc_elem = a.find("div", class_="d") or a.find("div", class_="at") or a.find("div", class_="location")
         location = loc_elem.get_text(" • ", strip=True) if loc_elem else "Локация не указана"
-        
+
         img = a.find("img")
         photo_url = None
         if img:
@@ -170,11 +188,11 @@ def parse_category_page(category_info, seen_items):
 
         items.append({
             "id": item_id,
-            "category": cat_name,
+            "badge": badge,
             "title": title,
             "price": price,
             "location": location,
-            "url": full_url,
+            "url": f"https://www.list.am{href}",
             "photo": photo_url
         })
         
@@ -183,51 +201,48 @@ def parse_category_page(category_info, seen_items):
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    logging.info("🚀 Запуск облачного мониторинга List.am 24/7...")
-    
     seen_items = load_seen_items()
-    first_run = len(seen_items) == 0
     
+    # 1. Тихое запоминание текущих объявлений при запуске
+    logging.info("Инициализация текущих объявлений...")
+    for cat in URLS_TO_TRACK:
+        items = parse_category_page(cat, seen_items)
+        for it in items:
+            seen_items.add(it["id"])
+    save_seen_items(seen_items)
+    
+    # 2. Сервисное сообщение
     send_telegram_message(
-        "☁️ <b>Облачный мониторинг List.am запущен 24/7!</b>\n\n"
-        "📁 <b>Категории:</b> Квартиры (Ереван/Абовян) + Дома/Земля (Котайк)\n"
-        "👤 <b>Фильтр:</b> Только собственники\n\n"
-        "<i>Бот работает на сервере независимо от ноутбука.</i>"
+        "🎯 <b>Радар недвижимости успешно обновлен!</b>\n\n"
+        "📁 <b>Отслеживаемые категории (только собственники):</b>\n"
+        "1. 🏢 <b>Квартиры:</b> продажа от $50,000\n"
+        "2. 🏡 <b>Дома:</b> продажа от $50,000\n"
+        "3. 🌳 <b>Участки:</b> продажа от $35,000\n\n"
+        f"✅ <i>База инициализирована ({len(seen_items)} объектов в памяти). Старый спам отключен, ждем только свежие публикации!</i>"
     )
     
+    # 3. Рабочий бесконечный цикл
     while True:
         try:
             for cat in URLS_TO_TRACK:
                 new_items = parse_category_page(cat, seen_items)
                 
-                if first_run:
-                    for item in new_items:
-                        seen_items.add(item["id"])
-                    logging.info(f"[{cat['name']}] Загружено {len(new_items)} текущих объявлений в память.")
-                else:
-                    for item in new_items:
-                        seen_items.add(item["id"])
-                        
-                        message = (
-                            f"⚡ <b>НОВОЕ ОБЪЯВЛЕНИЕ (Собственник)</b>\n"
-                            f"🏷 <i>{item['category']}</i>\n\n"
-                            f"📌 <b>{item['title']}</b>\n"
-                            f"💰 <b>Цена:</b> {item['price']}\n"
-                            f"📍 <b>Локация:</b> {item['location']}\n\n"
-                            f"🔗 <a href='{item['url']}'>Открыть на List.am</a>"
-                        )
-                        
-                        send_telegram_message(message, item.get("photo"))
-                        logging.info(f"⚡ Найдено: [{item['category']}] {item['title']} ({item['price']})")
-                        time.sleep(1)
-                
-                save_seen_items(seen_items)
+                for item in new_items:
+                    seen_items.add(item["id"])
+                    
+                    message = (
+                        f"⚡ <b>НОВОЕ ОБЪЯВЛЕНИЕ (Собственник)</b>\n"
+                        f"🏷 <b>{item['badge']}</b>\n\n"
+                        f"📌 <b>{item['title']}</b>\n"
+                        f"💰 <b>Цена:</b> {item['price']}\n"
+                        f"📍 <b>Локация:</b> {item['location']}\n\n"
+                        f"🔗 <a href='{item['url']}'>Открыть на List.am</a>"
+                    )
+                    
+                    send_telegram_message(message, item.get("photo"))
+                    time.sleep(1)
             
-            if first_run:
-                first_run = False
-                send_telegram_message(f"✅ <b>База инициализирована ({len(seen_items)} объявлений).</b> Бот активен 24/7!")
-                logging.info(f"Инициализация завершена. В базе {len(seen_items)} объявлений.")
-
+            save_seen_items(seen_items)
         except Exception as e:
             logging.error(f"Ошибка в цикле: {e}")
 

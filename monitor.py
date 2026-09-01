@@ -138,27 +138,35 @@ def fetch_page(url):
             return requests.get(url, impersonate="chrome120", headers=HEADERS, timeout=20)
         else:
             return requests.get(url, headers=HEADERS, timeout=20)
-    except Exception:
+    except Exception as e:
+        logging.error(f"Сетевая ошибка при запросе {url}: {e}")
         return None
 
 def parse_category_page(category_info, seen_items):
     url = category_info["url"]
     min_p = category_info["min_price"]
     badge = category_info["badge"]
+    name = category_info["name"]
     
     resp = fetch_page(url)
-    if not resp or resp.status_code != 200:
+    if not resp:
+        logging.warning(f"[{name}] Нет ответа от сервера (None)")
+        return []
+    if resp.status_code != 200:
+        logging.warning(f"[{name}] Ошибка доступа (Код: {resp.status_code})")
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
     items = []
     links = soup.find_all("a", href=True)
+    item_links_count = 0
     
     for a in links:
         href = a["href"]
         if not href.startswith("/item/"):
             continue
         
+        item_links_count += 1
         item_id = href.replace("/item/", "").split("?")[0].strip()
         if not item_id.isdigit() or item_id in seen_items:
             continue
@@ -194,6 +202,7 @@ def parse_category_page(category_info, seen_items):
             "photo": photo_url
         })
         
+    logging.info(f"[{name}] Статус: 200 OK | Всего объявлений на странице: {item_links_count} | Новых подходящих: {len(items)}")
     return items
 
 def main():
@@ -201,8 +210,7 @@ def main():
     
     seen_items = load_seen_items()
     
-    # 1. Тихое запоминание текущих объявлений при старте
-    logging.info("Синхронизация текущей базы...")
+    logging.info("🚀 Запуск синхронизации базы...")
     for cat in URLS_TO_TRACK:
         items = parse_category_page(cat, seen_items)
         for it in items:
@@ -211,13 +219,12 @@ def main():
     save_seen_items(seen_items)
     
     send_telegram_message(
-        "🚀 <b>Мониторинг перезапущен и активен!</b>\n\n"
+        "🚀 <b>Мониторинг обновлен!</b>\n\n"
         "📁 <b>Отслеживаем:</b> Квартиры (от $50k), Дома (от $50k), Участки (от $35k)\n"
         "👤 <b>Фильтр:</b> Только собственники\n"
-        f"✅ <i>Синхронизировано {len(seen_items)} объектов. Ожидаем свежие публикации!</i>"
+        f"✅ <i>Синхронизировано {len(seen_items)} объектов в памяти.</i>"
     )
     
-    # 2. Боевой бесконечный цикл
     while True:
         try:
             time.sleep(CHECK_INTERVAL)

@@ -49,12 +49,11 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7,hy;q=0.6",
-    "Referer": "https://www.list.am/",
-}
+# Создаем единую постоянную сессию браузера
+if USE_CURL_CFFI:
+    session = requests.Session(impersonate="chrome120")
+else:
+    session = requests.Session()
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -69,6 +68,14 @@ def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
+
+def init_session():
+    """Разогревает сессию на главной странице list.am."""
+    try:
+        resp = session.get("https://www.list.am/", timeout=20)
+        logging.info(f"Разогрев сессии list.am: статус {resp.status_code}")
+    except Exception as e:
+        logging.warning(f"Ошибка при разогреве сессии: {e}")
 
 def load_seen_items():
     if os.path.exists(SEEN_FILE):
@@ -134,10 +141,12 @@ def send_telegram_message(text, photo_url=None):
 
 def fetch_page(url):
     try:
-        if USE_CURL_CFFI:
-            return requests.get(url, impersonate="chrome120", headers=HEADERS, timeout=20)
-        else:
-            return requests.get(url, headers=HEADERS, timeout=20)
+        resp = session.get(url, timeout=25)
+        if resp.status_code == 403:
+            # При 403 пробуем пересоздать cookies
+            session.get("https://www.list.am/", timeout=20)
+            resp = session.get(url, timeout=25)
+        return resp
     except Exception as e:
         logging.error(f"Сетевая ошибка при запросе {url}: {e}")
         return None
@@ -202,11 +211,14 @@ def parse_category_page(category_info, seen_items):
             "photo": photo_url
         })
         
-    logging.info(f"[{name}] Статус: 200 OK | Всего объявлений на странице: {item_links_count} | Новых подходящих: {len(items)}")
+    logging.info(f"[{name}] 200 OK | Найдено карточек: {item_links_count} | Новых: {len(items)}")
     return items
 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
+    
+    # 1. Разогреваем сессию
+    init_session()
     
     seen_items = load_seen_items()
     
@@ -215,11 +227,11 @@ def main():
         items = parse_category_page(cat, seen_items)
         for it in items:
             seen_items.add(it["id"])
-        time.sleep(1)
+        time.sleep(2)
     save_seen_items(seen_items)
     
     send_telegram_message(
-        "🚀 <b>Мониторинг обновлен!</b>\n\n"
+        "🚀 <b>Мониторинг успешно запущен!</b>\n\n"
         "📁 <b>Отслеживаем:</b> Квартиры (от $50k), Дома (от $50k), Участки (от $35k)\n"
         "👤 <b>Фильтр:</b> Только собственники\n"
         f"✅ <i>Синхронизировано {len(seen_items)} объектов в памяти.</i>"
@@ -248,7 +260,7 @@ def main():
                     time.sleep(1.5)
                 
                 save_seen_items(seen_items)
-                time.sleep(1)
+                time.sleep(2)
                 
         except Exception as e:
             logging.error(f"Ошибка в цикле: {e}")
